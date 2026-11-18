@@ -1,34 +1,6 @@
-# Required packages: MASS, MCMCpack, mcmcse, and Matrix. Install them before
-# sourcing this file.
-
 library(MASS)
 library(MCMCpack)
-library(mcmcse)
 library(Matrix)
-
-# Each estimator takes a numeric G x N x T_train array Y:
-# Simulation 1: MAR(1), 20 x 20 x 90; see INPUT_SIMULATION1.md.
-# Simulation 2: MAR(3), 15 x 10 x 450; see INPUT_SIMULATION2.md.
-# Supplement S2: MAR(1), 24 x 28 x 160; see INPUT_SUPPLEMENT_S2.md.
-# Each input file specifies the required training array and estimator settings.
-# P: number of autoregressive lags.
-# partition_A / partition_B: coefficient groups; NULL uses individual coefficients.
-# A_init / B_init: starting coefficient matrices.
-# Sigma_A_init / Sigma_B_init: starting innovation covariance matrices.
-# n_iter: total MCMC sweeps.
-# burnin: initial MCMC sweeps discarded from posterior summaries.
-# warm_iter: initialization sweeps before the main MCMC run.
-# tau_A / tau_B: prior scales for the A and B coefficients.
-# prior_A / prior_B: prior inclusion probabilities for diagonal and off-diagonal entries.
-# pip_cut / pip_rule: threshold and comparison used to select coefficients from PIPs.
-# seed: seed for the estimator's main setup.
-# warm_seed: seed for warm-up when supplied separately.
-# sampling_seed: seed for posterior sampling when supplied separately.
-# numerics: numerical form of the coefficient updates.
-# whitening: choice of data whitening convention.
-# singleton_update: update rule for one-coefficient groups.
-# scale_update: timing of the scale update relative to coefficient rescaling.
-# Exact values for each simulation are in the corresponding input Markdown file.
 
 fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
     A_init = NULL, B_init = NULL, Sigma_A_init = NULL, Sigma_B_init = NULL,
@@ -38,13 +10,10 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
     scale_init = NULL, scale_df = NULL, eta_shape = 1, eta_rate = 1,
     pip_cut = 0.5, pip_rule = c(">", ">="), rescale = TRUE,
     random_lag_scan = FALSE, init_candidates = NULL,
-    numerics = c("precision", "conditional"),
     singleton_update = c("auto", "scalar", "group_1x1"),
-    whitening = c("original", "paper"),
     seed = NULL, warm_seed = NULL, sampling_seed = NULL,
-    keep_draws = TRUE, verbose_every = NULL, n_chains = 1L, workers = NULL,
+    keep_draws = TRUE, verbose_every = NULL,
     mcmc_clock = NULL) {
-  # Input checks and matrix operations are private to this estimator.
   integer_arg <- function(x, name, lower = 0L) {
     if (!is.numeric(x) || length(x) != 1L || !is.finite(x) ||
         x != floor(x) || x < lower || x > .Machine$integer.max)
@@ -62,9 +31,7 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
   if (!is.numeric(pip_cut) || length(pip_cut) != 1L || !is.finite(pip_cut) ||
       pip_cut < 0 || pip_cut > 1) stop("pip_cut must be in [0, 1].")
   pip_rule <- match.arg(pip_rule)
-  numerics <- match.arg(numerics)
   singleton_update <- match.arg(singleton_update)
-  whitening <- match.arg(whitening)
   for (flag in c("rescale", "keep_draws")) {
     x <- get(flag)
     if (!is.logical(x) || length(x) != 1L || is.na(x)) stop(flag, " must be TRUE or FALSE.")
@@ -72,44 +39,6 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
   if (!is.null(verbose_every)) verbose_every <- integer_arg(verbose_every, "verbose_every", 1L)
   for (name in c("seed", "warm_seed", "sampling_seed"))
     if (!is.null(get(name))) assign(name, integer_arg(get(name), name))
-  if (identical(n_chains, "auto")) {
-    n_chains <- parallel::detectCores(logical = TRUE)
-    if (is.na(n_chains)) stop("Cannot detect logical CPU cores.")
-  }
-  n_chains <- integer_arg(n_chains, "n_chains", 1L)
-  if (n_chains > 1L) {
-    if (is.null(workers)) workers <- parallel::detectCores(logical = TRUE)
-    if (length(workers) == 1L && is.na(workers)) workers <- 1L
-    workers <- integer_arg(workers, "workers", 1L)
-    base_seed <- if (is.null(seed)) sample.int(.Machine$integer.max, 1L) else seed
-    for (value in list(base_seed, warm_seed, sampling_seed)) {
-      if (!is.null(value) && value > .Machine$integer.max - n_chains + 1L)
-        stop("A seed plus n_chains - 1 exceeds the integer limit.")
-    }
-    params <- lapply(as.list(match.call(expand.dots = TRUE))[-1L],
-                     eval, envir = parent.frame())
-    params$n_chains <- 1L
-    params$workers <- 1L
-    jobs <- lapply(seq_len(n_chains), function(i) {
-      args <- params
-      offset <- i - 1L
-      args$seed <- as.integer(as.double(base_seed) + offset)
-      if (!is.null(warm_seed))
-        args$warm_seed <- as.integer(as.double(warm_seed) + offset)
-      if (!is.null(sampling_seed))
-        args$sampling_seed <- as.integer(as.double(sampling_seed) + offset)
-      args
-    })
-    self <- sys.function()
-    cluster <- parallel::makePSOCKcluster(min(workers, n_chains))
-    on.exit(parallel::stopCluster(cluster), add = TRUE)
-    chains <- parallel::parLapply(cluster, jobs, function(args, fit) do.call(fit, args),
-                                  fit = self)
-    names(chains) <- paste0("chain_", seq_len(n_chains))
-    return(list(method = chains[[1L]]$method, P = P, n_chains = n_chains,
-                workers = length(cluster), chain_seeds = vapply(jobs, function(x) x$seed, integer(1)),
-                chains = chains))
-  }
   positive <- function(x, name) {
     if (!is.numeric(x) || length(x) != 1L || !is.finite(x) || x <= 0)
       stop(name, " must be a positive finite number.")
@@ -202,7 +131,6 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
     rgamma(1L, shape = shape, rate = rate)
   }
   selected <- function(pip) if (pip_rule == ">") pip > pip_cut else pip >= pip_cut
-  # A single, stable output shape is used even when P=1.
   summarize <- function(chain, indicators, side) {
     estimates <- pips <- active_means <- all_means <- vector("list", P)
     d <- dim(chain)[3L]; n <- dim(chain)[1L]
@@ -240,55 +168,35 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
     if (is.null(partition_B)) "scalar" else "group_1x1" else singleton_update
   if (!is.logical(random_lag_scan) || length(random_lag_scan) != 1L || is.na(random_lag_scan))
     stop("random_lag_scan must be TRUE or FALSE.")
-  # Numerical policies preserve existing implementations without dispatching on P.
-  precision <- numerics == "precision"
-  chol_scaled <- precision; sym_cov <- precision; scale_matrix_trace <- FALSE
+  chol_scaled <- TRUE; sym_cov <- TRUE; scale_matrix_trace <- FALSE
   chol_jitter <- c(0, 1e-12, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2)
   logdet <- function(x) {
-    r <- if (precision) chol_safe(x) else chol_safe(x, jitter = c(0, 1e-12, 1e-10, 1e-8, 1e-6))
+    r <- chol_safe(x)
     2 * sum(log(diag(r)))
   }
   quadratic <- function(x, v) {
-    if (precision) {
-      z <- forwardsolve(t(chol_safe(x)), as.numeric(v))
-      return(as.numeric(crossprod(z)))
-    }
-    r <- chol_safe(x, jitter = c(0, 1e-12, 1e-10, 1e-8, 1e-6))
-    z <- backsolve(r, forwardsolve(t(r), v))
-    as.numeric(crossprod(v, z))
+    z <- forwardsolve(t(chol_safe(x)), as.numeric(v))
+    as.numeric(crossprod(z))
   }
   logit <- function(p) {
-    if (!precision) p <- pmin(pmax(p, 1e-10), 1 - 1e-10)
     log(p / (1 - p))
   }
-  probability <- function(x) plogis(if (precision) pmax(pmin(x, 700), -700) else pmin(x, 700))
+  probability <- function(x) plogis(pmax(pmin(x, 700), -700))
   update_mode <- function(response, design, Sigma, Phi, scale, groups, tau, prior, nu,
                           singleton_mode) {
     d <- nrow(response); nobs <- ncol(response)
     residual_all <- response - Phi %*% design
     all_singletons <- all(lengths(groups) == 1L)
-    if (precision) {
-      S <- sym(Sigma) + 1e-10 * diag(d)
-      omega <- inv(S)
-      gram <- crossprod(t(design))
-    }
+    S <- sym(Sigma) + 1e-10 * diag(d)
+    omega <- inv(S)
+    gram <- crossprod(t(design))
     for (i in seq_len(d)) {
       other <- setdiff(seq_len(d), i)
-      if (precision) {
-        w <- if (length(other)) -as.numeric(omega[i, other]) / omega[i, i] else numeric(0)
-        variance <- if (length(other)) max(1 / omega[i, i], 1e-12) else max(S[i, i], 1e-12)
-      } else if (length(other)) {
-        Soo <- sym(Sigma[other, other, drop = FALSE]) + 1e-10 * diag(length(other))
-        soi <- Sigma[other, i, drop = FALSE]
-        w <- as.numeric(solve(Soo, soi))
-        variance <- as.numeric(Sigma[i, i] - crossprod(soi, solve(Soo, soi)))
-        if (!is.finite(variance) || variance <= 1e-12) variance <- 1e-12
-      } else { w <- numeric(0); variance <- max(as.numeric(Sigma[i, i]), 1e-12) }
+      w <- if (length(other)) -as.numeric(omega[i, other]) / omega[i, i] else numeric(0)
+      variance <- if (length(other)) max(1 / omega[i, i], 1e-12) else max(S[i, i], 1e-12)
       adjustment <- if (length(other)) as.numeric(t(w) %*% residual_all[other, , drop = FALSE]) else rep(0, nobs)
       y <- as.numeric(response[i, ] - adjustment)
       row_residual <- y - as.numeric(Phi[i, ] %*% design)
-      # MAR(1) visits singleton coefficients in row order. Original MAR(3)
-      # visits the diagonal first, then each off-diagonal group.
       updates <- if (singleton_mode == "scalar" && all_singletons)
         as.list(seq_len(d)) else
         c(list(i), lapply(groups, function(block) setdiff(block, i)))
@@ -301,7 +209,7 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
           partial <- row_residual + Phi[i, j] * x
           slab <- if (j == i) tau[["diag"]] else tau[["off"]]
           inclusion <- if (j == i) prior[["diag"]] else prior[["off"]]
-          xx <- if (precision) gram[j, j] else sum(x^2)
+          xx <- gram[j, j]
           denom <- variance + slab^2 * xx
           v <- max(slab^2 * variance / denom, 1e-12)
           m <- slab^2 * sum(x * partial) / denom
@@ -312,12 +220,10 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
           Xg <- design[idx, , drop = FALSE]
           partial <- row_residual + as.numeric(Phi[i, idx, drop = FALSE] %*% Xg)
           post_precision <- Xg %*% t(Xg) / variance + diag(1 / tau[["off"]]^2, length(idx))
-          V <- if (precision) chol2inv(chol_safe(post_precision)) else
-            tryCatch(solve(post_precision), error = function(e) solve(post_precision + 1e-10 * diag(length(idx))))
+          V <- chol2inv(chol_safe(post_precision))
           V <- sym(V)
           mu <- V %*% (Xg %*% matrix(partial, ncol = 1L) / variance)
-          prior_logdet <- if (precision) length(idx) * log(tau[["off"]]^2) else
-            logdet(diag(tau[["off"]]^2, length(idx)))
+          prior_logdet <- length(idx) * log(tau[["off"]]^2)
           odds <- logit(prior[["off"]]) + 0.5 * (logdet(V) - prior_logdet) + 0.5 * quadratic(V, mu)
           on <- rbinom(1L, 1L, probability(odds))
           if (!on) Phi[i, idx] <- 0 else if (length(idx) == 1L)
@@ -347,7 +253,7 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
     is_A <- side == "A"
     d <- if (is_A) G else N; other <- if (is_A) N else G
     chol_other <- chol_safe(if (is_A) state$SB else state$SA)
-    whiten <- if (whitening == "original") t(solve(chol_other)) else solve(chol_other)
+    whiten <- t(solve(chol_other))
     coef <- if (is_A) state$B[[lag]] else state$A[[lag]]
     yw <- xw <- array(0, c(d, other, Q))
     for (q in seq_len(Q)) {
@@ -419,13 +325,13 @@ fit_mar_pointmass <- function(Y, P = 1L, partition_A = NULL, partition_B = NULL,
   method <- if (is.null(partition_A) && is.null(partition_B)) "CGS" else "GGS"
   out <- list(method = method, P = P, A_hat = a$hat, B_hat = b$hat, PIP_A = a$PIP, PIP_B = b$PIP,
     Sigma_A_last = state$SA, Sigma_B_last = state$SB, scale_last = state$scale,
-    warm_start_index = chosen, warm_scores = scores, runtime_sec = runtime,
+    runtime_sec = runtime,
     settings = list(P = P, n_iter = n_iter, burnin = burnin, warm_iter = warm_iter,
       partition_A = partA, partition_B = partB, tau_A = tauA, tau_B = tauB,
       prior_A = priorA, prior_B = priorB, pip_cut = pip_cut, pip_rule = pip_rule,
-      random_lag_scan = random_lag_scan, numerics = numerics,
+      random_lag_scan = random_lag_scan,
       singleton_update = c(A = modeA, B = modeB),
-      singleton_update_policy = singleton_update, whitening = whitening,
+      singleton_update_policy = singleton_update,
       rescale = rescale))
   if (keep_draws) { out$A_chain <- A_chain; out$B_chain <- B_chain; out$scale_chain <- scale_chain }
   out
@@ -442,12 +348,9 @@ fit_mar_ssvs <- function(Y, P = 1L,
     nu_A = NULL, nu_B = NULL, scale_init = 1, scale_df = NULL, eta_shape = 1, eta_rate = 1,
     pip_cut = 0.5, pip_rule = c(">", ">="), rescale = TRUE,
     scale_update = c("before_rescale", "after_rescale"),
-    numerics = c("density", "log_odds"), coefficient_jitter = 0,
-    whitening = c("original", "paper"),
     draw_initial_indicators = TRUE, seed = NULL, warm_seed = NULL, sampling_seed = NULL,
-    keep_draws = TRUE, verbose_every = NULL, n_chains = 1L, workers = NULL,
+    keep_draws = TRUE, verbose_every = NULL,
     mcmc_clock = NULL) {
-  # Input checks and matrix operations are private to this estimator.
   integer_arg <- function(x, name, lower = 0L) {
     if (!is.numeric(x) || length(x) != 1L || !is.finite(x) ||
         x != floor(x) || x < lower || x > .Machine$integer.max)
@@ -465,8 +368,6 @@ fit_mar_ssvs <- function(Y, P = 1L,
   if (!is.numeric(pip_cut) || length(pip_cut) != 1L || !is.finite(pip_cut) ||
       pip_cut < 0 || pip_cut > 1) stop("pip_cut must be in [0, 1].")
   pip_rule <- match.arg(pip_rule)
-  numerics <- match.arg(numerics)
-  whitening <- match.arg(whitening)
   for (flag in c("rescale", "keep_draws")) {
     x <- get(flag)
     if (!is.logical(x) || length(x) != 1L || is.na(x)) stop(flag, " must be TRUE or FALSE.")
@@ -474,44 +375,6 @@ fit_mar_ssvs <- function(Y, P = 1L,
   if (!is.null(verbose_every)) verbose_every <- integer_arg(verbose_every, "verbose_every", 1L)
   for (name in c("seed", "warm_seed", "sampling_seed"))
     if (!is.null(get(name))) assign(name, integer_arg(get(name), name))
-  if (identical(n_chains, "auto")) {
-    n_chains <- parallel::detectCores(logical = TRUE)
-    if (is.na(n_chains)) stop("Cannot detect logical CPU cores.")
-  }
-  n_chains <- integer_arg(n_chains, "n_chains", 1L)
-  if (n_chains > 1L) {
-    if (is.null(workers)) workers <- parallel::detectCores(logical = TRUE)
-    if (length(workers) == 1L && is.na(workers)) workers <- 1L
-    workers <- integer_arg(workers, "workers", 1L)
-    base_seed <- if (is.null(seed)) sample.int(.Machine$integer.max, 1L) else seed
-    for (value in list(base_seed, warm_seed, sampling_seed)) {
-      if (!is.null(value) && value > .Machine$integer.max - n_chains + 1L)
-        stop("A seed plus n_chains - 1 exceeds the integer limit.")
-    }
-    params <- lapply(as.list(match.call(expand.dots = TRUE))[-1L],
-                     eval, envir = parent.frame())
-    params$n_chains <- 1L
-    params$workers <- 1L
-    jobs <- lapply(seq_len(n_chains), function(i) {
-      args <- params
-      offset <- i - 1L
-      args$seed <- as.integer(as.double(base_seed) + offset)
-      if (!is.null(warm_seed))
-        args$warm_seed <- as.integer(as.double(warm_seed) + offset)
-      if (!is.null(sampling_seed))
-        args$sampling_seed <- as.integer(as.double(sampling_seed) + offset)
-      args
-    })
-    self <- sys.function()
-    cluster <- parallel::makePSOCKcluster(min(workers, n_chains))
-    on.exit(parallel::stopCluster(cluster), add = TRUE)
-    chains <- parallel::parLapply(cluster, jobs, function(args, fit) do.call(fit, args),
-                                  fit = self)
-    names(chains) <- paste0("chain_", seq_len(n_chains))
-    return(list(method = chains[[1L]]$method, P = P, n_chains = n_chains,
-                workers = length(cluster), chain_seeds = vapply(jobs, function(x) x$seed, integer(1)),
-                chains = chains))
-  }
   positive <- function(x, name) {
     if (!is.numeric(x) || length(x) != 1L || !is.finite(x) || x <= 0)
       stop(name, " must be a positive finite number.")
@@ -604,7 +467,6 @@ fit_mar_ssvs <- function(Y, P = 1L,
     rgamma(1L, shape = shape, rate = rate)
   }
   selected <- function(pip) if (pip_rule == ">") pip > pip_cut else pip >= pip_cut
-  # A single, stable output shape is used even when P=1.
   summarize <- function(chain, indicators, side) {
     estimates <- pips <- active_means <- all_means <- vector("list", P)
     d <- dim(chain)[3L]; n <- dim(chain)[1L]
@@ -634,19 +496,13 @@ fit_mar_ssvs <- function(Y, P = 1L,
   tau0_B <- positive(tau0_B, "tau0_B"); tau1_B <- positive(tau1_B, "tau1_B")
   if (tau1_A <= tau0_A || tau1_B <= tau0_B) stop("Each slab scale must exceed its spike scale.")
   alpha_theta <- positive(alpha_theta, "alpha_theta"); beta_theta <- positive(beta_theta, "beta_theta")
-  if (!is.numeric(coefficient_jitter) || length(coefficient_jitter) != 1L ||
-      !is.finite(coefficient_jitter) || coefficient_jitter < 0)
-    stop("coefficient_jitter must be a finite nonnegative number.")
-  density <- numerics == "density"
-  chol_scaled <- FALSE; sym_cov <- density; scale_matrix_trace <- density
-  chol_jitter <- if (density) c(0, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2) else
-    c(0, 1e-12, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2)
+  chol_scaled <- FALSE; sym_cov <- FALSE; scale_matrix_trace <- FALSE
+  chol_jitter <- c(0, 1e-12, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2)
   prior_matrix <- function(d, prior) {
     one <- matrix(prior[["off"]], d, d); diag(one) <- prior[["diag"]]
     do.call(cbind, rep(list(one), P))
   }
   fixed_A <- prior_matrix(G, priorA); fixed_B <- prior_matrix(N, priorB)
-  # Optional explicit initial probabilities also support estimating theta.
   theta_initial <- function(x, d, fixed) {
     if (is.null(x)) return(if (fixed_theta) fixed else alpha_theta / (alpha_theta + beta_theta))
     if (!is.numeric(x) || !(length(x) %in% c(1L, d * d, d * d * P)) ||
@@ -659,19 +515,12 @@ fit_mar_ssvs <- function(Y, P = 1L,
   if (fixed_theta) { fixed_A <- theta_A; fixed_B <- theta_B }
   inclusion <- function(phi, theta, tau0, tau1) {
     theta <- rep_len(as.numeric(theta), length(phi))
-    if (density) {
-      theta <- pmin(pmax(theta, 1e-8), 1 - 1e-8)
-      log1 <- log(theta) + dnorm(phi, mean = 0, sd = tau1, log = TRUE)
-      log0 <- log1p(-theta) + dnorm(phi, mean = 0, sd = tau0, log = TRUE)
-      return(plogis(log1 - log0))
-    }
     theta <- pmin(pmax(theta, 1e-10), 1 - 1e-10)
     odds <- log(theta / (1 - theta)) - 0.5 * (log(tau1^2) - log(tau0^2)) -
       0.5 * phi^2 * (1 / tau1^2 - 1 / tau0^2)
     plogis(pmax(pmin(odds, 700), -700))
   }
   split_lags <- function(x, d) lapply(seq_len(P), function(lag) x[, (lag - 1L) * d + seq_len(d), drop = FALSE])
-  # The block diagonal design is constructed from P; no order-specific code paths.
   X_block <- array(0, c(P * G, P * N, Q))
   for (q in seq_len(Q)) for (lag in seq_len(P))
     X_block[(lag - 1L) * G + seq_len(G), (lag - 1L) * N + seq_len(N), q] <- slice(lags[[lag]], q)
@@ -680,7 +529,7 @@ fit_mar_ssvs <- function(Y, P = 1L,
     d <- if (is_A) G else N; other <- if (is_A) N else G
     coef <- do.call(cbind, if (is_A) state$B else state$A)
     chol_other <- chol_safe(if (is_A) state$SB else state$SA)
-    whiten <- if (whitening == "original") t(solve(chol_other)) else solve(chol_other)
+    whiten <- t(solve(chol_other))
     yw <- array(0, c(d, other, Q)); xw <- array(0, c(P * d, other, Q))
     for (q in seq_len(Q)) {
       y <- slice(target, q); x <- slice(X_block, q)
@@ -698,24 +547,21 @@ fit_mar_ssvs <- function(Y, P = 1L,
       1 / ifelse(gamma == 1L, tau1^2, tau0^2)
     gram <- tcrossprod(w$X)
     like <- kronecker(gram, inv(Sigma))
-    if (!density) like <- sym(like)
+    like <- sym(like)
     prec <- like + diag(prior_precision, d * k)
-    if (density) prec <- sym(prec)
     covariance <- inv(prec)
-    if (!density) covariance <- sym(covariance)
+    covariance <- sym(covariance)
     ols <- w$Y %*% t(w$X) %*% solve(gram + 1e-8 * diag(k))
     mu <- as.numeric(covariance %*% (like %*% as.vector(ols)))
     if (map) values <- mu else {
       covariance <- sym(covariance)
-      # Avoid adding even a zero matrix when retaining the original density path.
-      if (coefficient_jitter > 0) covariance <- covariance + coefficient_jitter * diag(d * k)
       values <- as.numeric(MASS::mvrnorm(1L, mu = mu, Sigma = covariance))
     }
     coef <- matrix(values, d, k)
     residual <- w$Y - coef %*% w$X
     posterior_scale <- residual %*% t(residual) + scale * (diag(d) / d)
     sigma <- if (map) sym(posterior_scale / (nu + nobs + d + 1)) else
-      MCMCpack::riwish(nu + nobs, if (density) sym(posterior_scale) else posterior_scale)
+      MCMCpack::riwish(nu + nobs, posterior_scale)
     next_theta <- if (!is.null(fixed)) fixed else if (map)
       (sum(gamma) + alpha_theta) / (length(gamma) + alpha_theta + beta_theta) else
       rbeta(1L, sum(gamma) + alpha_theta, length(gamma) - sum(gamma) + beta_theta)
@@ -779,7 +625,7 @@ fit_mar_ssvs <- function(Y, P = 1L,
     settings = list(P = P, n_iter = n_iter, burnin = burnin, warm_iter = warm_iter,
       init_method = init_method, tau0_A = tau0_A, tau1_A = tau1_A, tau0_B = tau0_B, tau1_B = tau1_B,
       prior_A = priorA, prior_B = priorB, fixed_theta = fixed_theta, pip_cut = pip_cut,
-      pip_rule = pip_rule, numerics = numerics, whitening = whitening,
+      pip_rule = pip_rule,
       scale_update = scale_update, rescale = rescale))
   if (keep_draws) {
     out$A_chain <- A_chain; out$B_chain <- B_chain
